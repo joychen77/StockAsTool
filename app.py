@@ -119,14 +119,14 @@ def analyze_drawdown_buckets(df_prices):
     return pd.DataFrame(bucket_results, index=cols).T
 
 def extract_swings(series, limit):
-    """擷取波段數值與波段軌跡點 (起點 Low 與頂點 Peak)"""
+    """擷取波段數值、波段軌跡點與當前波段狀態"""
     prices = series.values
     dates = series.index
     swing_gains = []
     swing_points = []
     
     if len(prices) < 2:
-        return np.array([]), []
+        return np.array([]), [], {}
 
     in_swing = False
     p_low, p_low_date = prices[0], dates[0]
@@ -152,6 +152,14 @@ def extract_swings(series, limit):
                 p_low, p_low_date = p, d
                 p_peak, p_peak_date = p, d
 
+    # 當前進行中的波段
+    current_active_swing = {
+        'low_date': p_low_date,
+        'low_price': p_low,
+        'peak_date': p_peak_date,
+        'peak_price': p_peak
+    }
+
     if in_swing:
         gain = (p_peak - p_low) / p_low
         if gain >= limit:
@@ -162,14 +170,15 @@ def extract_swings(series, limit):
                 'gain': gain
             })
 
-    return np.array(swing_gains), swing_points
+    return np.array(swing_gains), swing_points, current_active_swing
 
 def analyze_rally_buckets(df_prices, limit):
-    bucket_results, stats_results, swings_dict = {}, {}, {}
+    bucket_results, stats_results, swings_dict, active_swings_dict = {}, {}, {}, {}
     for name in df_prices.columns:
         series = df_prices[name].dropna()
-        swing_gains, swing_points = extract_swings(series, limit)
+        swing_gains, swing_points, active_swing = extract_swings(series, limit)
         swings_dict[name] = swing_points
+        active_swings_dict[name] = active_swing
         total_swings = len(swing_gains)
 
         if total_swings > 0:
@@ -195,7 +204,7 @@ def analyze_rally_buckets(df_prices, limit):
 
     cols_b = ['+5%~+10%', '+10%~+15%', '+15%~+20%', '+20%~+25%', '+25%~+30%', '+30%~+40%', '+40%~+50%', '>+50%']
     cols_s = ['歷史波段總次數', '平均波段漲幅', '中位數波段漲幅', '歷史最大波段漲幅']
-    return pd.DataFrame(bucket_results, index=cols_b).T, pd.DataFrame(stats_results, index=cols_s).T, swings_dict
+    return pd.DataFrame(bucket_results, index=cols_b).T, pd.DataFrame(stats_results, index=cols_s).T, swings_dict, active_swings_dict
 
 # ==========================================
 # 頁面主體渲染
@@ -214,31 +223,55 @@ if symbols_input:
             st.info(f"💡 偵測到高股息相關標的 (`{', '.join(high_dividend_symbols)}`)，建議可於左側開關切換為 **「還原權息股價」** 評估真實總報酬！")
 
         df_dd = analyze_drawdown_buckets(df_prices)
-        df_rally_b, df_rally_s, swings_dict = analyze_rally_buckets(df_prices, pull_back_limit)
+        df_rally_b, df_rally_s, swings_dict, active_swings_dict = analyze_rally_buckets(df_prices, pull_back_limit)
 
         # ------------------------------------------
-        # 1. 當前水位即時指針與買點警示卡片 (新增)
+        # 1. 當前水位即時指針（附帶完整波段高低點與日期）
         # ------------------------------------------
-        st.subheader("🎯 【當前水位即時指針】進場甜蜜點警示")
+        st.subheader("🎯 【當前水位即時指針】波段高低點與進場警示")
         cols = st.columns(len(df_prices.columns))
         
         for idx, col_name in enumerate(df_prices.columns):
             series = df_prices[col_name].dropna()
             latest_price = round(series.iloc[-1], 2)
+            latest_date = series.index[-1].strftime('%Y-%m-%d')
+            
+            # 歷史最高價與其創高日期
             cummax_price = round(series.cummax().iloc[-1], 2)
+            cummax_date = series[series == series.cummax().iloc[-1]].index[-1].strftime('%Y-%m-%d')
+            
+            # 當前波段起漲點/近期低點
+            active_info = active_swings_dict.get(col_name, {})
+            low_p = round(active_info.get('low_price', series.min()), 2)
+            low_d = active_info.get('low_date', series.index[0]).strftime('%Y-%m-%d')
+            
             curr_dd = round((latest_price - cummax_price) / cummax_price * 100, 2)
             
-            # 計算目前回撤深度在歷史上的累積出現天數比例 (比當前回撤更深的天數佔比)
+            # 計算歷史罕見度
             all_dd = (series - series.cummax()) / series.cummax() * 100
             rare_pct = round((all_dd <= curr_dd).sum() / len(all_dd) * 100, 1)
             
             with cols[idx]:
-                st.markdown(f"#### **{col_name}**")
+                st.markdown(f"### **{col_name}**")
                 st.metric("最新股價", f"${latest_price}", f"距高點 {curr_dd}%")
+                st.caption(f"📅 報價日期：`{latest_date}`")
                 
-                # 燈號判定
+                # 詳細波段區間高低點標註
+                st.markdown(
+                    f"""
+                    <div style="background-color: #f8f9fa; padding: 10px; border-radius: 8px; border: 1px solid #e9ecef; margin-bottom: 10px; font-size: 13px;">
+                        <b>🔴 波段高點：</b> ${cummax_price}<br>
+                        <span style="color: gray; font-size: 11px;">(創高日: {cummax_date})</span><br>
+                        <b>🟢 波段低點：</b> ${low_p}<br>
+                        <span style="color: gray; font-size: 11px;">(起漲日: {low_d})</span>
+                    </div>
+                    """, 
+                    unsafe_allow_html=True
+                )
+                
+                # 燈號判定卡片
                 if curr_dd <= -20.0:
-                    st.error(f"🚨 **極度罕見買點**\n\n歷史僅 **{rare_pct}%** 天數比現在更便宜！")
+                    st.error(f"🚨 **極度罕見買點**\n\n歷史僅 **{rare_pct}%** 天數比現在更深！")
                 elif curr_dd <= -10.0:
                     st.success(f"💎 **波段進場甜蜜點**\n\n歷史僅 **{rare_pct}%** 天數處於此回檔深度！")
                 elif curr_dd <= -5.0:
@@ -278,7 +311,7 @@ if symbols_input:
         st.dataframe(df_rally_s, use_container_width=True)
 
         # ------------------------------------------
-        # 4. 動態疊加走勢與波段標註圖 (新增)
+        # 4. 動態疊加走勢與波段標註圖
         # ------------------------------------------
         st.subheader(f"🔍 【波段軌跡驗證】價格走勢與波段標註圖 (拉回門檻: {pull_back_pct}%)")
         selected_ticker = st.selectbox("選擇要檢視波段軌跡的標的：", df_prices.columns)
@@ -288,10 +321,8 @@ if symbols_input:
             points = swings_dict.get(selected_ticker, [])
             
             fig_overlay = go.Figure()
-            # 股價主曲線
             fig_overlay.add_trace(go.Scatter(x=s_price.index, y=s_price.values, mode='lines', name='收盤價', line=dict(color='#888888', width=1.5)))
             
-            # 標記起漲點 (Low) 與頂點 (Peak)
             if points:
                 low_dates = [p['low_date'] for p in points]
                 low_prices = [p['low_price'] for p in points]
@@ -300,14 +331,12 @@ if symbols_input:
                 gains_text = [f"起漲點<br>價格: {p['low_price']:.2f}" for p in points]
                 peaks_text = [f"頂點<br>價格: {p['peak_price']:.2f}<br>波段漲幅: +{p['gain']*100:.1f}%" for p in points]
                 
-                # 綠點：起漲點
                 fig_overlay.add_trace(go.Scatter(
                     x=low_dates, y=low_prices, mode='markers',
                     name='波段起點 (Low)', marker=dict(color='green', size=7, symbol='circle'),
                     hovertext=gains_text, hoverinfo='text+x'
                 ))
                 
-                # 紅點：波段頂點
                 fig_overlay.add_trace(go.Scatter(
                     x=peak_dates, y=peak_prices, mode='markers',
                     name='波段頂點 (Peak)', marker=dict(color='red', size=7, symbol='triangle-up'),
