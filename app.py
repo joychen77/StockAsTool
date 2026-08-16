@@ -26,7 +26,7 @@ auto_adjust_option = st.sidebar.radio(
     "股價計算模式 (配息還原)",
     options=["未還原收盤價 (純資本利得)", "還原權息股價 (含息總報酬)"],
     index=0,
-    help="• 未還原收盤價：適合不配息的槓桿商品 (如 00631L) 或只看票面價格波動。\n• 還原權息股價：適合高股息 ETF (如 0056, 00878) 或長期存股總報酬分析。"
+    help="• 未還原收盤價：適合不配息的槓桿商品 (如 00631L)。\n• 還原權息股價：適合高股息 ETF (如 0056, 00878)。"
 )
 is_auto_adjust = True if "含息總報酬" in auto_adjust_option else False
 
@@ -35,7 +35,23 @@ pull_back_pct = st.sidebar.slider("波段結算拉回門檻 (%)", min_value=2.0,
 pull_back_limit = pull_back_pct / 100.0
 
 st.sidebar.markdown("---")
-st.sidebar.caption("💡 **智慧補全提示**：輸入 `2330` 或 `00933B` 等純代碼時，系統會自動嘗試上市 (.TW) 與上櫃 (.TWO)。")
+# 使用者可自訂波段高低點的定義模式
+st.sidebar.subheader("🎯 即時指針：波段定義模式")
+swing_mode = st.sidebar.selectbox(
+    "選擇卡片呈現的高低點定義：",
+    options=[
+        "近期短線波段 (自訂近期交易日)",
+        "演算法進行中波段 (拉回門檻判定)",
+        "歷史全局天花板 (全期間最高/低)"
+    ],
+    index=0
+)
+
+rolling_days = 60
+if "近期短線波段" in swing_mode:
+    rolling_days = st.sidebar.slider("近期追蹤天數 (交易日)", min_value=20, max_value=180, value=60, step=10)
+
+st.sidebar.caption("💡 輸入 `2330` 或 `00933B` 等純代碼時，系統會自動補全上市 (.TW) 與上櫃 (.TWO)。")
 
 # ==========================================
 # 核心資料處理與演算法函式
@@ -119,7 +135,6 @@ def analyze_drawdown_buckets(df_prices):
     return pd.DataFrame(bucket_results, index=cols).T
 
 def extract_swings(series, limit):
-    """擷取波段數值、波段軌跡點與當前波段狀態"""
     prices = series.values
     dates = series.index
     swing_gains = []
@@ -152,7 +167,6 @@ def extract_swings(series, limit):
                 p_low, p_low_date = p, d
                 p_peak, p_peak_date = p, d
 
-    # 當前進行中的波段
     current_active_swing = {
         'low_date': p_low_date,
         'low_price': p_low,
@@ -226,9 +240,11 @@ if symbols_input:
         df_rally_b, df_rally_s, swings_dict, active_swings_dict = analyze_rally_buckets(df_prices, pull_back_limit)
 
         # ------------------------------------------
-        # 1. 當前水位即時指針（附帶完整波段高低點與日期）
+        # 1. 當前水位即時指針 (依據選定模式計算)
         # ------------------------------------------
         st.subheader("🎯 【當前水位即時指針】波段高低點與進場警示")
+        st.caption(f"📌 目前高低點計算基準：**{swing_mode}**" + (f" (最近 {rolling_days} 個交易日)" if "近期短線波段" in swing_mode else ""))
+        
         cols = st.columns(len(df_prices.columns))
         
         for idx, col_name in enumerate(df_prices.columns):
@@ -236,40 +252,48 @@ if symbols_input:
             latest_price = round(series.iloc[-1], 2)
             latest_date = series.index[-1].strftime('%Y-%m-%d')
             
-            # 歷史最高價與其創高日期
-            cummax_price = round(series.cummax().iloc[-1], 2)
-            cummax_date = series[series == series.cummax().iloc[-1]].index[-1].strftime('%Y-%m-%d')
+            # 根據使用者選擇的定義模式計算高低點
+            if "近期短線波段" in swing_mode:
+                recent_series = series.iloc[-rolling_days:] if len(series) >= rolling_days else series
+                peak_p = round(recent_series.max(), 2)
+                peak_d = recent_series.idxmax().strftime('%Y-%m-%d')
+                low_p = round(recent_series.min(), 2)
+                low_d = recent_series.idxmin().strftime('%Y-%m-%d')
+            elif "演算法進行中波段" in swing_mode:
+                active_info = active_swings_dict.get(col_name, {})
+                peak_p = round(active_info.get('peak_price', series.max()), 2)
+                peak_d = active_info.get('peak_date', series.index[0]).strftime('%Y-%m-%d')
+                low_p = round(active_info.get('low_price', series.min()), 2)
+                low_d = active_info.get('low_date', series.index[0]).strftime('%Y-%m-%d')
+            else: # 歷史全局天花板
+                peak_p = round(series.max(), 2)
+                peak_d = series.idxmax().strftime('%Y-%m-%d')
+                low_p = round(series.min(), 2)
+                low_d = series.idxmin().strftime('%Y-%m-%d')
             
-            # 當前波段起漲點/近期低點
-            active_info = active_swings_dict.get(col_name, {})
-            low_p = round(active_info.get('low_price', series.min()), 2)
-            low_d = active_info.get('low_date', series.index[0]).strftime('%Y-%m-%d')
+            curr_dd = round((latest_price - peak_p) / peak_p * 100, 2)
             
-            curr_dd = round((latest_price - cummax_price) / cummax_price * 100, 2)
-            
-            # 計算歷史罕見度
+            # 歷史全期間累積回撤深度罕見度
             all_dd = (series - series.cummax()) / series.cummax() * 100
             rare_pct = round((all_dd <= curr_dd).sum() / len(all_dd) * 100, 1)
             
             with cols[idx]:
                 st.markdown(f"### **{col_name}**")
-                st.metric("最新股價", f"${latest_price}", f"距高點 {curr_dd}%")
+                st.metric("最新股價", f"${latest_price}", f"距波段高點 {curr_dd}%")
                 st.caption(f"📅 報價日期：`{latest_date}`")
                 
-                # 詳細波段區間高低點標註
                 st.markdown(
                     f"""
                     <div style="background-color: #f8f9fa; padding: 10px; border-radius: 8px; border: 1px solid #e9ecef; margin-bottom: 10px; font-size: 13px;">
-                        <b>🔴 波段高點：</b> ${cummax_price}<br>
-                        <span style="color: gray; font-size: 11px;">(創高日: {cummax_date})</span><br>
+                        <b>🔴 波段高點：</b> ${peak_p}<br>
+                        <span style="color: gray; font-size: 11px;">(高點日: {peak_d})</span><br>
                         <b>🟢 波段低點：</b> ${low_p}<br>
-                        <span style="color: gray; font-size: 11px;">(起漲日: {low_d})</span>
+                        <span style="color: gray; font-size: 11px;">(低點日: {low_d})</span>
                     </div>
                     """, 
                     unsafe_allow_html=True
                 )
                 
-                # 燈號判定卡片
                 if curr_dd <= -20.0:
                     st.error(f"🚨 **極度罕見買點**\n\n歷史僅 **{rare_pct}%** 天數比現在更深！")
                 elif curr_dd <= -10.0:
@@ -277,7 +301,7 @@ if symbols_input:
                 elif curr_dd <= -5.0:
                     st.warning(f"👀 **拉回觀察區**\n\n歷史有 **{rare_pct}%** 天數比現在深。")
                 else:
-                    st.info(f"☁️ **常態強勢區**\n\n距高點小於 5%，無顯著回檔。")
+                    st.info(f"☁️ **常態強勢區**\n\n距波段高點 < 5%，無顯著回檔。")
 
         st.markdown("---")
 
