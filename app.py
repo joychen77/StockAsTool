@@ -51,15 +51,34 @@ if "近期短線波段" in swing_mode:
     rolling_days = st.sidebar.slider("近期追蹤天數 (交易日)", min_value=20, max_value=180, value=60, step=10)
 
 st.sidebar.markdown("---")
+# ==========================================
+# 動態金字塔階段數設定 (升級功能)
+# ==========================================
 st.sidebar.subheader("🪜 金字塔加碼策略參數")
-tier1_pct = st.sidebar.number_input("第 1 階回檔門檻 (%)", min_value=-50.0, max_value=-1.0, value=-5.0, step=1.0)
-tier1_w = st.sidebar.number_input("第 1 階資金比例 (%)", min_value=1, max_value=100, value=20, step=5)
+num_tiers = st.sidebar.number_input("設定分批加碼總階段數", min_value=1, max_value=6, value=3, step=1)
 
-tier2_pct = st.sidebar.number_input("第 2 階回檔門檻 (%)", min_value=-50.0, max_value=-1.0, value=-10.0, step=1.0)
-tier2_w = st.sidebar.number_input("第 2 階資金比例 (%)", min_value=1, max_value=100, value=30, step=5)
+tiers_config = []
+total_weight = 0
 
-tier3_pct = st.sidebar.number_input("第 3 階回檔門檻 (%)", min_value=-50.0, max_value=-1.0, value=-15.0, step=1.0)
-tier3_w = st.sidebar.number_input("第 3 階資金比例 (%)", min_value=1, max_value=100, value=50, step=5)
+# 預設範例數值參考
+default_pcts = [-5.0, -10.0, -15.0, -20.0, -25.0, -30.0]
+default_weights = [20, 30, 50, 20, 20, 20]
+
+for i in range(int(num_tiers)):
+    col_t1, col_t2 = st.sidebar.columns(2)
+    def_p = default_pcts[i] if i < len(default_pcts) else -5.0 * (i + 1)
+    def_w = default_weights[i] if i < len(default_weights) else 100 // int(num_tiers)
+    
+    with col_t1:
+        t_pct = st.number_input(f"第 {i+1} 階回檔門檻 (%)", min_value=-60.0, max_value=-1.0, value=def_p, step=1.0, key=f"tier_pct_{i}")
+    with col_t2:
+        t_w = st.number_input(f"第 {i+1} 階資金權重 (%)", min_value=1, max_value=100, value=def_w, step=5, key=f"tier_w_{i}")
+    
+    total_weight += t_w
+    tiers_config.append((t_pct / 100.0, t_w / 100.0))
+
+# 依門檻由小到大排序 (例如 -5% 先觸發、-10% 後觸發)
+tiers_config = sorted(tiers_config, key=lambda x: x[0], reverse=True)
 
 # ==========================================
 # 核心資料處理與演算法函式
@@ -236,9 +255,6 @@ def analyze_rally_buckets(df_prices, limit):
     cols_s = ['歷史波段總次數', '平均波段漲幅', '中位數波段漲幅', '歷史最大波段漲幅', '平均歷時天數', '日均推進速度']
     return pd.DataFrame(bucket_results, index=cols_b).T, pd.DataFrame(stats_results, index=cols_s).T, swings_dict, active_swings_dict
 
-# ------------------------------------------
-# 新增功能 1：回撤復原時間 (Time Under Water) 統計
-# ------------------------------------------
 def calculate_time_under_water(df_prices):
     tuw_thresholds = [-0.05, -0.10, -0.15, -0.20, -0.25, -0.30]
     records = []
@@ -261,12 +277,10 @@ def calculate_time_under_water(df_prices):
                         in_dd = True
                         start_idx = i
                 else:
-                    # 重新突破先前高點創歷史新高
                     if drawdown.iloc[i] == 0:
                         in_dd = False
                         durations.append(i - start_idx)
             
-            # 若目前仍處於回撤中，記錄當前天數
             if in_dd:
                 durations.append(len(series) - 1 - start_idx)
                 
@@ -284,26 +298,21 @@ def calculate_time_under_water(df_prices):
     return pd.DataFrame(records)
 
 # ------------------------------------------
-# 新增功能 2：多階梯金字塔加碼試算 (Pyramid Buying Backtest)
+# 支援任意 N 階段之金字塔回測核心演算法
 # ------------------------------------------
 def simulate_pyramid_strategy(series, tiers):
-    """
-    tiers 格式: [(-0.05, 0.20), (-0.10, 0.30), (-0.15, 0.50)]
-    """
     cummax = series.cummax()
     drawdown = (series - cummax) / cummax
     
     rounds = []
     in_round = False
     triggered_tiers = set()
-    purchases = [] # (price, weight)
-    peak_reference_price = 0.0
+    purchases = []
     
     for i in range(len(series)):
         p = series.iloc[i]
         dd = drawdown.iloc[i]
         
-        # 創歷史新高時結算上一輪加碼
         if dd == 0:
             if in_round and purchases:
                 total_w = sum(w for _, w in purchases)
@@ -316,11 +325,9 @@ def simulate_pyramid_strategy(series, tiers):
                         'exit_price': p,
                         'gain_pct': gain_pct
                     })
-            # 重置輪次
             in_round = False
             triggered_tiers = set()
             purchases = []
-            peak_reference_price = p
         else:
             in_round = True
             for tier_idx, (th, weight) in enumerate(tiers):
@@ -444,7 +451,7 @@ if symbols_input:
         st.plotly_chart(fig_dd_heat, use_container_width=True)
 
         # ------------------------------------------
-        # 3. 賣點分析區 (含波段歷時與推進速度)
+        # 3. 賣點分析區
         # ------------------------------------------
         st.subheader(f"🔴 【賣點分析】未拉回 {pull_back_pct}% 前，波段漲幅落點區間佔比 (%)")
         fig_rally_heat = px.imshow(
@@ -462,29 +469,22 @@ if symbols_input:
         st.markdown("---")
 
         # ------------------------------------------
-        # 4. 新增：回撤解套時間統計 (Time Under Water)
+        # 4. 回撤解套時間統計 (Time Under Water)
         # ------------------------------------------
         st.subheader("⏳ 【時間成本分析】回撤深度平均解套天數與最長套牢期 (TUW)")
-        st.caption("統計當股價跌破特定深度後，重新創歷史新高所需的交易日數 (評估等待時間成本)。")
+        st.caption("統計當股價跌破特定深度後，重新創歷史新高所需的交易日數。")
         df_tuw = calculate_time_under_water(df_prices)
         st.dataframe(df_tuw, use_container_width=True)
 
         st.markdown("---")
 
         # ------------------------------------------
-        # 5. 新增：金字塔分批加碼策略回測
+        # 5. 金字塔分批加碼策略回測 (動態 N 階)
         # ------------------------------------------
-        st.subheader("🪜 【資金配置實戰】多階梯金字塔加碼策略回測")
-        total_weight = tier1_w + tier2_w + tier3_w
+        st.subheader(f"🪜 【資金配置實戰】自訂 {num_tiers} 階段金字塔加碼策略回測")
         if total_weight != 100:
-            st.warning(f"⚠️ 目前三階資金權重加總為 {total_weight}%，建議調整至 100% 以利精準試算。")
+            st.warning(f"⚠️ 目前各階資金權重加總為 **{total_weight}%**，建議調整各階加總至 100% 以利精準試算。")
 
-        tiers_config = [
-            (tier1_pct / 100.0, tier1_w / 100.0),
-            (tier2_pct / 100.0, tier2_w / 100.0),
-            (tier3_pct / 100.0, tier3_w / 100.0)
-        ]
-        
         pyramid_results = {}
         for col_name in df_prices.columns:
             s = df_prices[col_name].dropna()
