@@ -8,14 +8,14 @@ import streamlit as st
 
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="股票歷史波段分析工具", page_icon="📈", layout="wide")
+st.set_page_config(page_title="股票歷史波段與交易策略分析系統", page_icon="📈", layout="wide")
 
-st.title("📈 股票歷史波段回撤與漲幅分析系統")
+st.title("📈 股票歷史波段回撤、漲幅與實戰策略分析系統")
 
 # ==========================================
 # 側邊欄：使用者互動控制項
 # ==========================================
-st.sidebar.header("⚙️ 參數設定")
+st.sidebar.header("⚙️ 核心參數設定")
 
 symbols_input = st.sidebar.text_input(
     "輸入股票代碼 (多檔以逗號隔開)", 
@@ -26,7 +26,7 @@ auto_adjust_option = st.sidebar.radio(
     "股價計算模式 (配息還原)",
     options=["未還原收盤價 (純資本利得)", "還原權息股價 (含息總報酬)"],
     index=0,
-    help="• 未還原收盤價：適合不配息的槓桿商品 (如 00631L)。\n• 還原權息股價：適合高股息 ETF (如 0056, 00878)。"
+    help="• 未還原收盤價：適合槓桿商品 (如 00631L)。\n• 還原權息股價：適合高股息 ETF (如 0056, 00878)。"
 )
 is_auto_adjust = True if "含息總報酬" in auto_adjust_option else False
 
@@ -35,7 +35,6 @@ pull_back_pct = st.sidebar.slider("波段結算拉回門檻 (%)", min_value=2.0,
 pull_back_limit = pull_back_pct / 100.0
 
 st.sidebar.markdown("---")
-# 使用者可自訂波段高低點的定義模式
 st.sidebar.subheader("🎯 即時指針：波段定義模式")
 swing_mode = st.sidebar.selectbox(
     "選擇卡片呈現的高低點定義：",
@@ -51,7 +50,16 @@ rolling_days = 60
 if "近期短線波段" in swing_mode:
     rolling_days = st.sidebar.slider("近期追蹤天數 (交易日)", min_value=20, max_value=180, value=60, step=10)
 
-st.sidebar.caption("💡 輸入 `2330` 或 `00933B` 等純代碼時，系統會自動補全上市 (.TW) 與上櫃 (.TWO)。")
+st.sidebar.markdown("---")
+st.sidebar.subheader("🪜 金字塔加碼策略參數")
+tier1_pct = st.sidebar.number_input("第 1 階回檔門檻 (%)", min_value=-50.0, max_value=-1.0, value=-5.0, step=1.0)
+tier1_w = st.sidebar.number_input("第 1 階資金比例 (%)", min_value=1, max_value=100, value=20, step=5)
+
+tier2_pct = st.sidebar.number_input("第 2 階回檔門檻 (%)", min_value=-50.0, max_value=-1.0, value=-10.0, step=1.0)
+tier2_w = st.sidebar.number_input("第 2 階資金比例 (%)", min_value=1, max_value=100, value=30, step=5)
+
+tier3_pct = st.sidebar.number_input("第 3 階回檔門檻 (%)", min_value=-50.0, max_value=-1.0, value=-15.0, step=1.0)
+tier3_w = st.sidebar.number_input("第 3 階資金比例 (%)", min_value=1, max_value=100, value=50, step=5)
 
 # ==========================================
 # 核心資料處理與演算法函式
@@ -137,60 +145,61 @@ def analyze_drawdown_buckets(df_prices):
 def extract_swings(series, limit):
     prices = series.values
     dates = series.index
-    swing_gains = []
-    swing_points = []
+    swing_gains, swing_durations, swing_points = [], [], []
     
     if len(prices) < 2:
-        return np.array([]), [], {}
+        return np.array([]), np.array([]), [], {}
 
     in_swing = False
-    p_low, p_low_date = prices[0], dates[0]
-    p_peak, p_peak_date = prices[0], dates[0]
+    p_low, p_low_date, p_low_idx = prices[0], dates[0], 0
+    p_peak, p_peak_date, p_peak_idx = prices[0], dates[0], 0
 
-    for p, d in zip(prices, dates):
+    for idx, (p, d) in enumerate(zip(prices, dates)):
         if not in_swing:
-            p_low, p_low_date = p, d
-            p_peak, p_peak_date = p, d
+            p_low, p_low_date, p_low_idx = p, d, idx
+            p_peak, p_peak_date, p_peak_idx = p, d, idx
             in_swing = True
         else:
             if p > p_peak:
-                p_peak, p_peak_date = p, d
+                p_peak, p_peak_date, p_peak_idx = p, d, idx
             elif (p - p_peak) / p_peak <= -limit:
                 gain = (p_peak - p_low) / p_low
+                duration = p_peak_idx - p_low_idx
                 if gain >= limit:
                     swing_gains.append(gain)
+                    swing_durations.append(max(1, duration))
                     swing_points.append({
                         'low_date': p_low_date, 'low_price': p_low,
                         'peak_date': p_peak_date, 'peak_price': p_peak,
-                        'gain': gain
+                        'gain': gain, 'duration': max(1, duration)
                     })
-                p_low, p_low_date = p, d
-                p_peak, p_peak_date = p, d
+                p_low, p_low_date, p_low_idx = p, d, idx
+                p_peak, p_peak_date, p_peak_idx = p, d, idx
 
     current_active_swing = {
-        'low_date': p_low_date,
-        'low_price': p_low,
-        'peak_date': p_peak_date,
-        'peak_price': p_peak
+        'low_date': p_low_date, 'low_price': p_low,
+        'peak_date': p_peak_date, 'peak_price': p_peak
     }
 
     if in_swing:
         gain = (p_peak - p_low) / p_low
+        duration = p_peak_idx - p_low_idx
         if gain >= limit:
             swing_gains.append(gain)
+            swing_durations.append(max(1, duration))
             swing_points.append({
                 'low_date': p_low_date, 'low_price': p_low,
                 'peak_date': p_peak_date, 'peak_price': p_peak,
-                'gain': gain
+                'gain': gain, 'duration': max(1, duration)
             })
 
-    return np.array(swing_gains), swing_points, current_active_swing
+    return np.array(swing_gains), np.array(swing_durations), swing_points, current_active_swing
 
 def analyze_rally_buckets(df_prices, limit):
     bucket_results, stats_results, swings_dict, active_swings_dict = {}, {}, {}, {}
     for name in df_prices.columns:
         series = df_prices[name].dropna()
-        swing_gains, swing_points, active_swing = extract_swings(series, limit)
+        swing_gains, swing_durations, swing_points, active_swing = extract_swings(series, limit)
         swings_dict[name] = swing_points
         active_swings_dict[name] = active_swing
         total_swings = len(swing_gains)
@@ -206,19 +215,138 @@ def analyze_rally_buckets(df_prices, limit):
                 round(((swing_gains >= 0.40) & (swing_gains < 0.50)).sum() / total_swings * 100, 2),
                 round((swing_gains >= 0.50).sum() / total_swings * 100, 2)
             ]
+            
+            avg_gain = swing_gains.mean() * 100
+            avg_dur = swing_durations.mean()
+            velocity = avg_gain / avg_dur if avg_dur > 0 else 0
+            
             stats_results[name] = [
                 total_swings,
-                f"+{round(swing_gains.mean() * 100, 2)}%",
+                f"+{round(avg_gain, 2)}%",
                 f"+{round(np.median(swing_gains) * 100, 2)}%",
-                f"+{round(swing_gains.max() * 100, 2)}%"
+                f"+{round(swing_gains.max() * 100, 2)}%",
+                f"{round(avg_dur, 1)} 天",
+                f"+{round(velocity, 2)}% / 天"
             ]
         else:
             bucket_results[name] = [0]*8
-            stats_results[name] = [0, "0%", "0%", "0%"]
+            stats_results[name] = [0, "0%", "0%", "0%", "0 天", "0% / 天"]
 
     cols_b = ['+5%~+10%', '+10%~+15%', '+15%~+20%', '+20%~+25%', '+25%~+30%', '+30%~+40%', '+40%~+50%', '>+50%']
-    cols_s = ['歷史波段總次數', '平均波段漲幅', '中位數波段漲幅', '歷史最大波段漲幅']
+    cols_s = ['歷史波段總次數', '平均波段漲幅', '中位數波段漲幅', '歷史最大波段漲幅', '平均歷時天數', '日均推進速度']
     return pd.DataFrame(bucket_results, index=cols_b).T, pd.DataFrame(stats_results, index=cols_s).T, swings_dict, active_swings_dict
+
+# ------------------------------------------
+# 新增功能 1：回撤復原時間 (Time Under Water) 統計
+# ------------------------------------------
+def calculate_time_under_water(df_prices):
+    tuw_thresholds = [-0.05, -0.10, -0.15, -0.20, -0.25, -0.30]
+    records = []
+    
+    for name in df_prices.columns:
+        series = df_prices[name].dropna()
+        cummax = series.cummax()
+        drawdown = (series - cummax) / cummax
+        
+        row_data = {}
+        for th in tuw_thresholds:
+            th_pct = int(abs(th) * 100)
+            in_dd = False
+            start_idx = 0
+            durations = []
+            
+            for i in range(len(series)):
+                if not in_dd:
+                    if drawdown.iloc[i] <= th:
+                        in_dd = True
+                        start_idx = i
+                else:
+                    # 重新突破先前高點創歷史新高
+                    if drawdown.iloc[i] == 0:
+                        in_dd = False
+                        durations.append(i - start_idx)
+            
+            # 若目前仍處於回撤中，記錄當前天數
+            if in_dd:
+                durations.append(len(series) - 1 - start_idx)
+                
+            if durations:
+                avg_days = round(np.mean(durations), 1)
+                max_days = int(np.max(durations))
+                row_data[f"≤-{th_pct}% 平均解套"] = f"{avg_days} 天"
+                row_data[f"≤-{th_pct}% 最長套牢"] = f"{max_days} 天"
+            else:
+                row_data[f"≤-{th_pct}% 平均解套"] = "未曾跌破"
+                row_data[f"≤-{th_pct}% 最長套牢"] = "未曾跌破"
+                
+        records.append(pd.Series(row_data, name=name))
+        
+    return pd.DataFrame(records)
+
+# ------------------------------------------
+# 新增功能 2：多階梯金字塔加碼試算 (Pyramid Buying Backtest)
+# ------------------------------------------
+def simulate_pyramid_strategy(series, tiers):
+    """
+    tiers 格式: [(-0.05, 0.20), (-0.10, 0.30), (-0.15, 0.50)]
+    """
+    cummax = series.cummax()
+    drawdown = (series - cummax) / cummax
+    
+    rounds = []
+    in_round = False
+    triggered_tiers = set()
+    purchases = [] # (price, weight)
+    peak_reference_price = 0.0
+    
+    for i in range(len(series)):
+        p = series.iloc[i]
+        dd = drawdown.iloc[i]
+        
+        # 創歷史新高時結算上一輪加碼
+        if dd == 0:
+            if in_round and purchases:
+                total_w = sum(w for _, w in purchases)
+                if total_w > 0:
+                    avg_cost = sum(price * w for price, w in purchases) / total_w
+                    gain_pct = (p - avg_cost) / avg_cost * 100
+                    rounds.append({
+                        'executed_tiers': len(purchases),
+                        'avg_cost': avg_cost,
+                        'exit_price': p,
+                        'gain_pct': gain_pct
+                    })
+            # 重置輪次
+            in_round = False
+            triggered_tiers = set()
+            purchases = []
+            peak_reference_price = p
+        else:
+            in_round = True
+            for tier_idx, (th, weight) in enumerate(tiers):
+                if dd <= th and tier_idx not in triggered_tiers:
+                    triggered_tiers.add(tier_idx)
+                    purchases.append((p, weight))
+
+    if not rounds:
+        return {"觸發總輪數": 0, "平均資金報酬率": "0%", "勝率": "0%", "各階觸發分佈": "無"}
+        
+    total_rounds = len(rounds)
+    wins = sum(1 for r in rounds if r['gain_pct'] > 0)
+    avg_gain = np.mean([r['gain_pct'] for r in rounds])
+    win_rate = (wins / total_rounds) * 100
+    
+    tier_counts = {}
+    for r in rounds:
+        tier_counts[r['executed_tiers']] = tier_counts.get(r['executed_tiers'], 0) + 1
+    tier_dist_str = ", ".join([f"加至第{k}階: {v}次" for k, v in sorted(tier_counts.items())])
+    
+    return {
+        "觸發總輪數": f"{total_rounds} 輪",
+        "平均每輪加權報酬": f"+{round(avg_gain, 2)}%",
+        "策略勝率": f"{round(win_rate, 1)}%",
+        "各階觸發分佈": tier_dist_str
+    }
 
 # ==========================================
 # 頁面主體渲染
@@ -240,7 +368,7 @@ if symbols_input:
         df_rally_b, df_rally_s, swings_dict, active_swings_dict = analyze_rally_buckets(df_prices, pull_back_limit)
 
         # ------------------------------------------
-        # 1. 當前水位即時指針 (依據選定模式計算)
+        # 1. 當前水位即時指針
         # ------------------------------------------
         st.subheader("🎯 【當前水位即時指針】波段高低點與進場警示")
         st.caption(f"📌 目前高低點計算基準：**{swing_mode}**" + (f" (最近 {rolling_days} 個交易日)" if "近期短線波段" in swing_mode else ""))
@@ -252,7 +380,6 @@ if symbols_input:
             latest_price = round(series.iloc[-1], 2)
             latest_date = series.index[-1].strftime('%Y-%m-%d')
             
-            # 根據使用者選擇的定義模式計算高低點
             if "近期短線波段" in swing_mode:
                 recent_series = series.iloc[-rolling_days:] if len(series) >= rolling_days else series
                 peak_p = round(recent_series.max(), 2)
@@ -265,15 +392,13 @@ if symbols_input:
                 peak_d = active_info.get('peak_date', series.index[0]).strftime('%Y-%m-%d')
                 low_p = round(active_info.get('low_price', series.min()), 2)
                 low_d = active_info.get('low_date', series.index[0]).strftime('%Y-%m-%d')
-            else: # 歷史全局天花板
+            else:
                 peak_p = round(series.max(), 2)
                 peak_d = series.idxmax().strftime('%Y-%m-%d')
                 low_p = round(series.min(), 2)
                 low_d = series.idxmin().strftime('%Y-%m-%d')
             
             curr_dd = round((latest_price - peak_p) / peak_p * 100, 2)
-            
-            # 歷史全期間累積回撤深度罕見度
             all_dd = (series - series.cummax()) / series.cummax() * 100
             rare_pct = round((all_dd <= curr_dd).sum() / len(all_dd) * 100, 1)
             
@@ -319,7 +444,7 @@ if symbols_input:
         st.plotly_chart(fig_dd_heat, use_container_width=True)
 
         # ------------------------------------------
-        # 3. 賣點分析區 (熱力圖與摘要)
+        # 3. 賣點分析區 (含波段歷時與推進速度)
         # ------------------------------------------
         st.subheader(f"🔴 【賣點分析】未拉回 {pull_back_pct}% 前，波段漲幅落點區間佔比 (%)")
         fig_rally_heat = px.imshow(
@@ -331,11 +456,47 @@ if symbols_input:
         )
         st.plotly_chart(fig_rally_heat, use_container_width=True)
 
-        st.markdown("#### 📋 波段統計摘要")
+        st.markdown("#### 📋 波段統計摘要 (含歷時天數與日均推進速度)")
         st.dataframe(df_rally_s, use_container_width=True)
 
+        st.markdown("---")
+
         # ------------------------------------------
-        # 4. 動態疊加走勢與波段標註圖
+        # 4. 新增：回撤解套時間統計 (Time Under Water)
+        # ------------------------------------------
+        st.subheader("⏳ 【時間成本分析】回撤深度平均解套天數與最長套牢期 (TUW)")
+        st.caption("統計當股價跌破特定深度後，重新創歷史新高所需的交易日數 (評估等待時間成本)。")
+        df_tuw = calculate_time_under_water(df_prices)
+        st.dataframe(df_tuw, use_container_width=True)
+
+        st.markdown("---")
+
+        # ------------------------------------------
+        # 5. 新增：金字塔分批加碼策略回測
+        # ------------------------------------------
+        st.subheader("🪜 【資金配置實戰】多階梯金字塔加碼策略回測")
+        total_weight = tier1_w + tier2_w + tier3_w
+        if total_weight != 100:
+            st.warning(f"⚠️ 目前三階資金權重加總為 {total_weight}%，建議調整至 100% 以利精準試算。")
+
+        tiers_config = [
+            (tier1_pct / 100.0, tier1_w / 100.0),
+            (tier2_pct / 100.0, tier2_w / 100.0),
+            (tier3_pct / 100.0, tier3_w / 100.0)
+        ]
+        
+        pyramid_results = {}
+        for col_name in df_prices.columns:
+            s = df_prices[col_name].dropna()
+            pyramid_results[col_name] = simulate_pyramid_strategy(s, tiers_config)
+            
+        df_pyramid = pd.DataFrame(pyramid_results).T
+        st.dataframe(df_pyramid, use_container_width=True)
+
+        st.markdown("---")
+
+        # ------------------------------------------
+        # 6. 動態疊加走勢與波段標註圖
         # ------------------------------------------
         st.subheader(f"🔍 【波段軌跡驗證】價格走勢與波段標註圖 (拉回門檻: {pull_back_pct}%)")
         selected_ticker = st.selectbox("選擇要檢視波段軌跡的標的：", df_prices.columns)
@@ -353,7 +514,7 @@ if symbols_input:
                 peak_dates = [p['peak_date'] for p in points]
                 peak_prices = [p['peak_price'] for p in points]
                 gains_text = [f"起漲點<br>價格: {p['low_price']:.2f}" for p in points]
-                peaks_text = [f"頂點<br>價格: {p['peak_price']:.2f}<br>波段漲幅: +{p['gain']*100:.1f}%" for p in points]
+                peaks_text = [f"頂點<br>價格: {p['peak_price']:.2f}<br>波段漲幅: +{p['gain']*100:.1f}%<br>歷時: {p['duration']}天" for p in points]
                 
                 fig_overlay.add_trace(go.Scatter(
                     x=low_dates, y=low_prices, mode='markers',
@@ -375,7 +536,7 @@ if symbols_input:
             st.plotly_chart(fig_overlay, use_container_width=True)
 
         # ------------------------------------------
-        # 5. 回撤曲線對照
+        # 7. 回撤曲線對照
         # ------------------------------------------
         st.subheader("📉 【多標的比較】歷史波段回撤對照曲線 (%)")
         fig_curve = go.Figure()
